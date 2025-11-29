@@ -1,71 +1,184 @@
 import express from "express";
 import cors from "cors";
-import jwt from "jsonwebtoken";
-import multer from "multer";
+import bodyParser from "body-parser";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
-const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret";
+const PORT = process.env.PORT || 3000;
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
+// Middleware
 app.use(cors());
-app.use(express.json());
+app.use(bodyParser.json());
 
-// Multer setup
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
+// Supabase service client
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// JWT auth
-function authenticate(req, res, next) {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ message: "No token" });
-  try { req.user = jwt.verify(token, JWT_SECRET); next(); }
-  catch { return res.status(403).json({ message: "Invalid token" }); }
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Render environment variables.");
+  process.exit(1);
 }
-function authorize(roles = []) { return (req, res, next) => {
-  if (!roles.includes(req.user.role)) return res.status(403).json({ message: "Access denied" });
-  next();
-};}
 
-// LOGIN
-app.post("/auth/login", async (req,res)=>{
-  const { username, password } = req.body;
-  const { data: users } = await supabase.from("users").select("*").eq("username", username);
-  const user = users[0];
-  if(!user || user.password !== password) return res.status(401).json({message:"Invalid credentials"});
-  const token = jwt.sign({ id:user.id, role:user.role }, JWT_SECRET, { expiresIn:"8h" });
-  res.json({ token, user });
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// =========================================
+// Helper: generate username for teacher/student
+function generateTeacherUsername(surname) {
+  const randomNum = Math.floor(100 + Math.random() * 900); // 3-digit number
+  return surname.toLowerCase() + randomNum;
+}
+
+let studentCounter = 1; // optional: can query DB for last number
+async function generateStudentUsername() {
+  const { data } = await supabase.from("students").select("student_number").order("student_number", { ascending: false }).limit(1).maybeSingle();
+  if (data && data.student_number) {
+    studentCounter = parseInt(data.student_number) + 1;
+  }
+  return studentCounter.toString().padStart(4, "0");
+}
+
+// =========================================
+// Endpoint: create teacher
+app.post("/create-teacher", async (req, res) => {
+  try {
+    const { surname, first_name, assigned_class_id = null, subject_ids = [] } = req.body;
+    if (!surname || !first_name) return res.status(400).json({ error: "surname & first_name required" });
+
+    const username = generateTeacherUsername(surname);
+    const defaultPassword = "teacher"; // default password
+
+    // create auth user
+    const { data: userData, error: authErr } = await supabase.auth.admin.createUser({
+      email: username + "@school.com",
+      password: defaultPassword,
+      email_confirm: true
+    });
+
+    if (authErr) return res.status(500).json({ error: authErr.message });
+
+    // insert teacher record
+    const { data: teacher, error: teacherErr } = await supabase.from("teachers").insert({ first_name, surname, assigned_class_id }).select().single();
+    if (teacherErr) return res.status(500).json({ error: teacherErr.message });
+
+    // link teacher to app_users
+    const { error: appUserErr } = await supabase.from("app_users").insert({
+      auth_uid: userData.user.id,
+      username,
+      role_id: 2, // teacher
+      ref_id: teacher.id
+    });
+    if (appUserErr) return res.status(500).json({ error: appUserErr.message });
+
+    // insert teacher_subjects
+    for (const subject_id of subject_ids) {
+      await supabase.from("teacher_subjects").insert({ teacher_id: teacher.id, subject_id });
+    }
+
+    res.json({ username, password: defaultPassword });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error creating teacher" });
+  }
 });
 
-// UPLOAD ASSIGNMENT
-app.post("/assignments", authenticate, authorize(["teacher"]), upload.single("file"), async (req,res)=>{
-  const { title } = req.body; const file = req.file;
-  if(!file) return res.status(400).json({message:"No file uploaded"});
-  const fileName = `${Date.now()}_${file.originalname}`;
-  const { data, error } = await supabase.storage.from("assignments").upload(fileName, file.buffer, { contentType:file.mimetype });
-  if(error) return res.status(500).json({message:error.message});
-  const { data: assignmentData, error: tableError } = await supabase.from("assignments").insert([{ title, file_url: data.path, teacher_id: req.user.id }]).select();
-  if(tableError) return res.status(500).json({message: tableError.message});
-  res.json(assignmentData[0]);
+// =========================================
+// Endpoint: create student
+app.post("/create-student", async (req, res) => {
+  try {
+    const { first_name, surname, class_id, gender = "M" } = req.body;
+    if (!first_name || !surname || !class_id) return res.status(400).json({ error: "first_name, surname, class_id required" });
+
+    const username = await generateStudentUsername();
+    const defaultPassword = "student";
+
+    // create auth user
+    const { data: userData, error: authErr } = await supabase.auth.admin.createUser({
+      email: username + "@school.com",
+      password: defaultPassword,
+      email_confirm: true
+    });
+    if (authErr) return res.status(500).json({ error: authErr.message });
+
+    // insert student record
+    const { data: student, error: studentErr } = await supabase.from("students").insert({
+      first_name,
+      surname,
+      class_id,
+      gender,
+      student_number: username
+    }).select().single();
+    if (studentErr) return res.status(500).json({ error: studentErr.message });
+
+    // link student to app_users
+    const { error: appUserErr } = await supabase.from("app_users").insert({
+      auth_uid: userData.user.id,
+      username,
+      role_id: 3, // student
+      ref_id: student.id
+    });
+    if (appUserErr) return res.status(500).json({ error: appUserErr.message });
+
+    res.json({ username, password: defaultPassword });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error creating student" });
+  }
 });
 
-// UPLOAD NOTE
-app.post("/notes", authenticate, authorize(["teacher"]), upload.single("file"), async (req,res)=>{
-  const { title } = req.body; const file = req.file;
-  if(!file) return res.status(400).json({message:"No file uploaded"});
-  const fileName = `${Date.now()}_${file.originalname}`;
-  const { data, error } = await supabase.storage.from("notes").upload(fileName, file.buffer, { contentType:file.mimetype });
-  if(error) return res.status(500).json({message:error.message});
-  const { data: noteData, error: tableError } = await supabase.from("notes").insert([{ title, file_url: data.path, teacher_id: req.user.id }]).select();
-  if(tableError) return res.status(500).json({message: tableError.message});
-  res.json(noteData[0]);
+// =========================================
+// Endpoint: submit CBT (auto-mark)
+app.post("/submit-cbt", async (req, res) => {
+  try {
+    const { cbt_id, answers, student_id } = req.body;
+    if (!cbt_id || !answers || !student_id) return res.status(400).json({ error: "cbt_id, answers, student_id required" });
+
+    // fetch questions
+    const { data: questions, error: qErr } = await supabase.from("cbt_questions").select("*").eq("cbt_id", cbt_id);
+    if (qErr) return res.status(500).json({ error: qErr.message });
+
+    let score = 0;
+    questions.forEach((q, i) => {
+      if (answers[i] && answers[i].toString().toLowerCase() === q.correct_answer.toString().toLowerCase()) score += 1;
+    });
+
+    const totalQuestions = questions.length;
+    const percentage = totalQuestions ? Math.round((score / totalQuestions) * 100) : 0;
+
+    // compute WAEC grade
+    let grade;
+    if (percentage >= 75) grade = "A1";
+    else if (percentage >= 70) grade = "B2";
+    else if (percentage >= 65) grade = "B3";
+    else if (percentage >= 60) grade = "C4";
+    else if (percentage >= 55) grade = "C5";
+    else if (percentage >= 50) grade = "C6";
+    else if (percentage >= 45) grade = "D7";
+    else if (percentage >= 40) grade = "E8";
+    else grade = "F9";
+
+    // insert submission
+    const { data, error: subErr } = await supabase.from("cbt_submissions").insert({
+      cbt_id,
+      student_id,
+      answers,
+      score: percentage,
+      grade
+    }).select().single();
+
+    if (subErr) return res.status(500).json({ error: subErr.message });
+
+    res.json({ score: percentage, grade });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error submitting CBT" });
+  }
 });
 
-// Other endpoints (fees, attendance, timetable, reportcards) remain as in previous server.js
+// =========================================
+// Start server
+app.listen(PORT, () => {
+  console.log(`School portal backend running on port ${PORT}`);
+});
 
-app.listen(PORT,()=>{console.log(`Server running on port ${PORT}`);});
+
 
