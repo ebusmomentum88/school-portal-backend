@@ -1,175 +1,138 @@
+// =========================
+// FINAL WORKING SERVER.JS
+// =========================
+
 import express from "express";
 import cors from "cors";
-import bodyParser from "body-parser";
+import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 
+dotenv.config();
+
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(express.json());
 
 // =========================
-// CORS — ALLOW ONLY YOUR FRONTEND
+// CORS SETUP — ADD YOUR FRONTEND URL HERE
 // =========================
-app.use(cors({
-  origin: [
-    "https://school-portal-d9om.vercel.app",
-    "https://your-frontend-url.vercel.app",
-    "http://localhost:5500"
-  ]
-}));
-
-app.use(bodyParser.json());
-
-// =========================
-// SUPABASE CONNECTION
-// =========================
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",        // Local development
+      "https://school-portal-d9om.vercel.app" 
+    ],
+    methods: "GET,POST,PUT,DELETE",
+    allowedHeaders: "Content-Type, Authorization"
+  })
 );
 
 // =========================
-// API ROUTE PREFIX
+// SUPABASE CLIENTS
 // =========================
-const api = express.Router();
-app.use("/api", api);
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY // needed for creating logins
+);
+
+const supabasePublic = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
 
 // =========================
-// GET CLASSES
+// ADMIN — CREATE TEACHER ACCOUNT
 // =========================
-api.get("/classes", async (req, res) => {
-  const { data, error } = await supabase.from("classes").select("*");
-  if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
-});
-
-// =========================
-// GET SUBJECTS
-// =========================
-api.get("/subjects", async (req, res) => {
-  const { data, error } = await supabase.from("subjects").select("*");
-  if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
-});
-
-// =========================
-// CREATE TEACHER
-// =========================
-api.post("/create-teacher", async (req, res) => {
+app.post("/admin/create-teacher", async (req, res) => {
   try {
-    const { surname, first_name, assigned_class_id, subject_ids } = req.body;
+    const { name, email, password, subject } = req.body;
 
-    if (!surname || !first_name)
-      return res.status(400).json({ error: "surname & first_name required" });
-
-    const username = surname.toLowerCase() + Math.floor(100 + Math.random() * 900);
-
-    const { data: userData, error: authErr } =
+    const { data: authUser, error: authError } =
       await supabase.auth.admin.createUser({
-        email: `${username}@school.com`,
-        password: "teacher",
-        email_confirm: true
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: { role: "teacher", name, subject }
       });
 
-    if (authErr) return res.status(400).json({ error: authErr.message });
+    if (authError) throw authError;
 
-    const { data: teacher, error: insertErr } = await supabase
-      .from("teachers")
-      .insert({ surname, first_name, assigned_class_id })
-      .select()
-      .single();
-
-    if (insertErr) return res.status(400).json({ error: insertErr.message });
-
-    await supabase.from("app_users").insert({
-      auth_uid: userData.user.id,
-      username,
-      role_id: 2,
-      ref_id: teacher.id
-    });
-
-    for (const sub of subject_ids) {
-      await supabase.from("teacher_subjects").insert({
-        teacher_id: teacher.id,
-        subject_id: sub
-      });
-    }
-
-    res.json({ username, password: "teacher" });
-  } catch (e) {
-    res.status(500).json({ error: "Server error" });
+    res.json({ success: true, user: authUser });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // =========================
-// CREATE STUDENT
+// ADMIN — CREATE STUDENT ACCOUNT
 // =========================
-api.post("/create-student", async (req, res) => {
+app.post("/admin/create-student", async (req, res) => {
   try {
-    const { first_name, surname, class_id, gender } = req.body;
+    const { name, classLevel } = req.body;
 
-    const username = Date.now().toString().slice(-4);
+    // generate student ID (0001 format)
+    const studentID = Math.floor(1000 + Math.random() * 9000);
 
-    const { data: userData, error: authErr } =
+    const email = `student${studentID}@school.com`;
+    const password = "123456"; // default password
+
+    const { data: authUser, error: authError } =
       await supabase.auth.admin.createUser({
-        email: `${username}@school.com`,
-        password: "student",
-        email_confirm: true
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          role: "student",
+          name,
+          classLevel,
+          studentID
+        }
       });
 
-    if (authErr) return res.status(400).json({ error: authErr.message });
+    if (authError) throw authError;
 
-    const { data: student, error: studentErr } = await supabase
-      .from("students")
-      .insert({
-        first_name,
-        surname,
-        class_id,
-        gender,
-        student_number: username
-      })
-      .select()
-      .single();
-
-    if (studentErr) return res.status(400).json({ error: studentErr.message });
-
-    await supabase.from("app_users").insert({
-      auth_uid: userData.user.id,
-      username,
-      role_id: 3,
-      ref_id: student.id
+    res.json({
+      success: true,
+      studentID,
+      defaultPassword: password,
+      user: authUser
     });
-
-    res.json({ username, password: "student" });
-  } catch (e) {
-    res.status(500).json({ error: "Server error" });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // =========================
-// CBT SUBMISSION
+// LOGIN HANDLER (ALL ROLES)
 // =========================
-api.post("/submit-cbt", async (req, res) => {
-  const { cbt_id, student_id, answers } = req.body;
+app.post("/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
 
-  const { data: questions } = await supabase
-    .from("cbt_questions")
-    .select("*")
-    .eq("cbt_id", cbt_id);
+    const { data, error } = await supabasePublic.auth.signInWithPassword({
+      email,
+      password
+    });
 
-  let score = 0;
-  questions.forEach((q, i) => {
-    if (answers[i] == q.correct_answer) score++;
-  });
+    if (error) throw error;
 
-  const percent = Math.round((score / questions.length) * 100);
+    res.json({ success: true, user: data.user });
+  } catch (err) {
+    res.status(401).json({ success: false, error: err.message });
+  }
+});
 
-  res.json({ score: percent, grade: percent > 70 ? "A" : "F" });
+// =========================
+// TEST ROUTE
+// =========================
+app.get("/", (req, res) => {
+  res.send("Server is running...");
 });
 
 // =========================
 // START SERVER
 // =========================
-app.listen(PORT, () => console.log("Backend running on PORT", PORT));
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log("SERVER RUNNING ON PORT", PORT));
 
 
 
