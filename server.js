@@ -6,204 +6,171 @@ import { createClient } from "@supabase/supabase-js";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ----------------------
-// FRONTEND CORS CONFIG
-// ----------------------
-const FRONTEND_URL = "https://school-portal-peach.vercel.app";
+// =========================
+// CORS — ALLOW ONLY YOUR FRONTEND
+// =========================
 app.use(cors({
-  origin: FRONTEND_URL
+  origin: [
+    "https://school-portal-peach.vercel.app",
+    "https://your-frontend-url.vercel.app",
+    "http://localhost:5500"
+  ]
 }));
 
-// Middleware
 app.use(bodyParser.json());
 
-// ----------------------
-// SUPABASE CLIENT
-// ----------------------
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+// =========================
+// SUPABASE CONNECTION
+// =========================
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Render environment variables.");
-  process.exit(1);
-}
+// =========================
+// API ROUTE PREFIX
+// =========================
+const api = express.Router();
+app.use("/api", api);
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+// =========================
+// GET CLASSES
+// =========================
+api.get("/classes", async (req, res) => {
+  const { data, error } = await supabase.from("classes").select("*");
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
+});
 
-// ==========================
-// HELPER FUNCTIONS
-// ==========================
-function generateTeacherUsername(surname) {
-  const randomNum = Math.floor(100 + Math.random() * 900); // 3-digit number
-  return surname.toLowerCase() + randomNum;
-}
+// =========================
+// GET SUBJECTS
+// =========================
+api.get("/subjects", async (req, res) => {
+  const { data, error } = await supabase.from("subjects").select("*");
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
+});
 
-let studentCounter = 1;
-async function generateStudentUsername() {
-  const { data } = await supabase
-    .from("students")
-    .select("student_number")
-    .order("student_number", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (data && data.student_number) {
-    studentCounter = parseInt(data.student_number) + 1;
-  }
-  return studentCounter.toString().padStart(4, "0");
-}
-
-// ==========================
-// ADMIN ENDPOINTS
-// ==========================
-app.post("/api/create-teacher", async (req, res) => {
+// =========================
+// CREATE TEACHER
+// =========================
+api.post("/create-teacher", async (req, res) => {
   try {
-    const { surname, first_name, assigned_class_id = null, subject_ids = [] } = req.body;
-    if (!surname || !first_name) return res.status(400).json({ error: "surname & first_name required" });
+    const { surname, first_name, assigned_class_id, subject_ids } = req.body;
 
-    const username = generateTeacherUsername(surname);
-    const defaultPassword = "teacher";
+    if (!surname || !first_name)
+      return res.status(400).json({ error: "surname & first_name required" });
 
-    const { data: userData, error: authErr } = await supabase.auth.admin.createUser({
-      email: username + "@school.com",
-      password: defaultPassword,
-      email_confirm: true
-    });
-    if (authErr) return res.status(500).json({ error: authErr.message });
+    const username = surname.toLowerCase() + Math.floor(100 + Math.random() * 900);
 
-    const { data: teacher, error: teacherErr } = await supabase
+    const { data: userData, error: authErr } =
+      await supabase.auth.admin.createUser({
+        email: `${username}@school.com`,
+        password: "teacher",
+        email_confirm: true
+      });
+
+    if (authErr) return res.status(400).json({ error: authErr.message });
+
+    const { data: teacher, error: insertErr } = await supabase
       .from("teachers")
-      .insert({ first_name, surname, assigned_class_id })
+      .insert({ surname, first_name, assigned_class_id })
       .select()
       .single();
-    if (teacherErr) return res.status(500).json({ error: teacherErr.message });
 
-    const { error: appUserErr } = await supabase.from("app_users").insert({
+    if (insertErr) return res.status(400).json({ error: insertErr.message });
+
+    await supabase.from("app_users").insert({
       auth_uid: userData.user.id,
       username,
       role_id: 2,
       ref_id: teacher.id
     });
-    if (appUserErr) return res.status(500).json({ error: appUserErr.message });
 
-    for (const subject_id of subject_ids) {
-      await supabase.from("teacher_subjects").insert({ teacher_id: teacher.id, subject_id });
+    for (const sub of subject_ids) {
+      await supabase.from("teacher_subjects").insert({
+        teacher_id: teacher.id,
+        subject_id: sub
+      });
     }
 
-    res.json({ username, password: defaultPassword });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error creating teacher" });
+    res.json({ username, password: "teacher" });
+  } catch (e) {
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-app.post("/api/create-student", async (req, res) => {
+// =========================
+// CREATE STUDENT
+// =========================
+api.post("/create-student", async (req, res) => {
   try {
-    const { first_name, surname, class_id, gender = "M" } = req.body;
-    if (!first_name || !surname || !class_id) return res.status(400).json({ error: "first_name, surname, class_id required" });
+    const { first_name, surname, class_id, gender } = req.body;
 
-    const username = await generateStudentUsername();
-    const defaultPassword = "student";
+    const username = Date.now().toString().slice(-4);
 
-    const { data: userData, error: authErr } = await supabase.auth.admin.createUser({
-      email: username + "@school.com",
-      password: defaultPassword,
-      email_confirm: true
-    });
-    if (authErr) return res.status(500).json({ error: authErr.message });
+    const { data: userData, error: authErr } =
+      await supabase.auth.admin.createUser({
+        email: `${username}@school.com`,
+        password: "student",
+        email_confirm: true
+      });
 
-    const { data: student, error: studentErr } = await supabase.from("students").insert({
-      first_name,
-      surname,
-      class_id,
-      gender,
-      student_number: username
-    }).select().single();
-    if (studentErr) return res.status(500).json({ error: studentErr.message });
+    if (authErr) return res.status(400).json({ error: authErr.message });
 
-    const { error: appUserErr } = await supabase.from("app_users").insert({
+    const { data: student, error: studentErr } = await supabase
+      .from("students")
+      .insert({
+        first_name,
+        surname,
+        class_id,
+        gender,
+        student_number: username
+      })
+      .select()
+      .single();
+
+    if (studentErr) return res.status(400).json({ error: studentErr.message });
+
+    await supabase.from("app_users").insert({
       auth_uid: userData.user.id,
       username,
       role_id: 3,
       ref_id: student.id
     });
-    if (appUserErr) return res.status(500).json({ error: appUserErr.message });
 
-    res.json({ username, password: defaultPassword });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error creating student" });
+    res.json({ username, password: "student" });
+  } catch (e) {
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-// ==========================
+// =========================
 // CBT SUBMISSION
-// ==========================
-app.post("/api/submit-cbt", async (req, res) => {
-  try {
-    const { cbt_id, answers, student_id } = req.body;
-    if (!cbt_id || !answers || !student_id) return res.status(400).json({ error: "cbt_id, answers, student_id required" });
+// =========================
+api.post("/submit-cbt", async (req, res) => {
+  const { cbt_id, student_id, answers } = req.body;
 
-    const { data: questions, error: qErr } = await supabase.from("cbt_questions").select("*").eq("cbt_id", cbt_id);
-    if (qErr) return res.status(500).json({ error: qErr.message });
+  const { data: questions } = await supabase
+    .from("cbt_questions")
+    .select("*")
+    .eq("cbt_id", cbt_id);
 
-    let score = 0;
-    questions.forEach((q, i) => {
-      if (answers[i] && answers[i].toString().toLowerCase() === q.correct_answer.toString().toLowerCase()) score += 1;
-    });
+  let score = 0;
+  questions.forEach((q, i) => {
+    if (answers[i] == q.correct_answer) score++;
+  });
 
-    const totalQuestions = questions.length;
-    const percentage = totalQuestions ? Math.round((score / totalQuestions) * 100) : 0;
+  const percent = Math.round((score / questions.length) * 100);
 
-    let grade;
-    if (percentage >= 75) grade = "A1";
-    else if (percentage >= 70) grade = "B2";
-    else if (percentage >= 65) grade = "B3";
-    else if (percentage >= 60) grade = "C4";
-    else if (percentage >= 55) grade = "C5";
-    else if (percentage >= 50) grade = "C6";
-    else if (percentage >= 45) grade = "D7";
-    else if (percentage >= 40) grade = "E8";
-    else grade = "F9";
-
-    const { data, error: subErr } = await supabase.from("cbt_submissions").insert({
-      cbt_id,
-      student_id,
-      answers,
-      score: percentage,
-      grade
-    }).select().single();
-
-    if (subErr) return res.status(500).json({ error: subErr.message });
-
-    res.json({ score: percentage, grade });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error submitting CBT" });
-  }
+  res.json({ score: percent, grade: percent > 70 ? "A" : "F" });
 });
 
-// ==========================
-// FETCH CLASSES & SUBJECTS
-// ==========================
-app.get("/api/classes", async (req, res) => {
-  const { data, error } = await supabase.from("classes").select("*");
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
-app.get("/api/subjects", async (req, res) => {
-  const { data, error } = await supabase.from("subjects").select("*");
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
-// ==========================
+// =========================
 // START SERVER
-// ==========================
-app.listen(PORT, () => {
-  console.log(`School portal backend running on port ${PORT}`);
-});
+// =========================
+app.listen(PORT, () => console.log("Backend running on PORT", PORT));
+
 
 
 
