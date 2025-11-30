@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 // =========================
 app.use(cors({
   origin: [
-    "https://school-portal-peach.vercel.app",
+    "https://school-portal-d9om.vercel.app",
     "https://your-frontend-url.vercel.app",
     "http://localhost:5500"
   ]
@@ -170,6 +170,7 @@ api.post("/submit-cbt", async (req, res) => {
 // START SERVER
 // =========================
 app.listen(PORT, () => console.log("Backend running on PORT", PORT));
+
 
 
 
