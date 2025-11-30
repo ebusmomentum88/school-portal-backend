@@ -10,7 +10,7 @@ import { createClient } from "@supabase/supabase-js";
 // ==========================
 const app = express();
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = "https://school-portal-d9om.vercel.app";
+const FRONTEND_URL = "https://school-portal-9sdr.vercel.app";
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -179,6 +179,7 @@ app.post("/api/submit-cbt", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`School portal backend running on port ${PORT}`);
 });
+
 
 
 
