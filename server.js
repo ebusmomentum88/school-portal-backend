@@ -6,23 +6,22 @@ import { createClient } from "@supabase/supabase-js";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------------------------
-// CORS: allow your frontend
-// ---------------------------
+// ==============================
+// FRONTEND URL (for CORS)
+// ==============================
+const FRONTEND_URL = "https://school-portal-peach.vercel.app";
+
 app.use(cors({
-  origin: "https://school-portal-peach.vercel.app", // frontend domain
+  origin: FRONTEND_URL,
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true
 }));
 
-// ---------------------------
-// Body parser
-// ---------------------------
 app.use(bodyParser.json());
 
-// ---------------------------
-// Supabase service client
-// ---------------------------
+// ==============================
+// SUPABASE CONFIG
+// ==============================
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -33,26 +32,36 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-// ---------------------------
-// Helpers: generate usernames
-// ---------------------------
+// ==============================
+// Helper functions
+// ==============================
 function generateTeacherUsername(surname) {
-  const randomNum = Math.floor(100 + Math.random() * 900); // 3-digit number
+  const randomNum = Math.floor(100 + Math.random() * 900);
   return surname.toLowerCase() + randomNum;
 }
 
 let studentCounter = 1;
 async function generateStudentUsername() {
-  const { data } = await supabase.from("students").select("student_number").order("student_number", { ascending: false }).limit(1).maybeSingle();
+  const { data } = await supabase
+    .from("students")
+    .select("student_number")
+    .order("student_number", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
   if (data && data.student_number) {
     studentCounter = parseInt(data.student_number) + 1;
   }
   return studentCounter.toString().padStart(4, "0");
 }
 
-// ---------------------------
-// Endpoint: create teacher
-// ---------------------------
+// ==============================
+// Endpoints
+// ==============================
+
+// ------------------------------
+// Admin: Create Teacher
+// ------------------------------
 app.post("/create-teacher", async (req, res) => {
   try {
     const { surname, first_name, assigned_class_id = null, subject_ids = [] } = req.body;
@@ -68,13 +77,17 @@ app.post("/create-teacher", async (req, res) => {
     });
     if (authErr) return res.status(500).json({ error: authErr.message });
 
-    const { data: teacher, error: teacherErr } = await supabase.from("teachers").insert({ first_name, surname, assigned_class_id }).select().single();
+    const { data: teacher, error: teacherErr } = await supabase
+      .from("teachers")
+      .insert({ first_name, surname, assigned_class_id })
+      .select()
+      .single();
     if (teacherErr) return res.status(500).json({ error: teacherErr.message });
 
     const { error: appUserErr } = await supabase.from("app_users").insert({
       auth_uid: userData.user.id,
       username,
-      role_id: 2, // teacher
+      role_id: 2,
       ref_id: teacher.id
     });
     if (appUserErr) return res.status(500).json({ error: appUserErr.message });
@@ -90,9 +103,9 @@ app.post("/create-teacher", async (req, res) => {
   }
 });
 
-// ---------------------------
-// Endpoint: create student
-// ---------------------------
+// ------------------------------
+// Admin: Create Student
+// ------------------------------
 app.post("/create-student", async (req, res) => {
   try {
     const { first_name, surname, class_id, gender = "M" } = req.body;
@@ -120,7 +133,7 @@ app.post("/create-student", async (req, res) => {
     const { error: appUserErr } = await supabase.from("app_users").insert({
       auth_uid: userData.user.id,
       username,
-      role_id: 3, // student
+      role_id: 3,
       ref_id: student.id
     });
     if (appUserErr) return res.status(500).json({ error: appUserErr.message });
@@ -132,9 +145,9 @@ app.post("/create-student", async (req, res) => {
   }
 });
 
-// ---------------------------
-// Endpoint: submit CBT
-// ---------------------------
+// ------------------------------
+// Submit CBT (auto-mark)
+// ------------------------------
 app.post("/submit-cbt", async (req, res) => {
   try {
     const { cbt_id, answers, student_id } = req.body;
@@ -151,6 +164,7 @@ app.post("/submit-cbt", async (req, res) => {
     const totalQuestions = questions.length;
     const percentage = totalQuestions ? Math.round((score / totalQuestions) * 100) : 0;
 
+    // Compute WAEC grade
     let grade;
     if (percentage >= 75) grade = "A1";
     else if (percentage >= 70) grade = "B2";
@@ -179,12 +193,77 @@ app.post("/submit-cbt", async (req, res) => {
   }
 });
 
-// ---------------------------
+// ------------------------------
+// Input student results
+// ------------------------------
+app.post("/input-result", async (req, res) => {
+  try {
+    const { student_id, subject_id, term, session, teacher_id, ca1 = 0, ca2 = 0, exam = 0 } = req.body;
+
+    const total = ca1 + ca2 + exam;
+
+    let grade;
+    if (total >= 75) grade = "A1";
+    else if (total >= 70) grade = "B2";
+    else if (total >= 65) grade = "B3";
+    else if (total >= 60) grade = "C4";
+    else if (total >= 55) grade = "C5";
+    else if (total >= 50) grade = "C6";
+    else if (total >= 45) grade = "D7";
+    else if (total >= 40) grade = "E8";
+    else grade = "F9";
+
+    const { data, error } = await supabase.from("results").insert({
+      student_id,
+      subject_id,
+      term,
+      session,
+      teacher_id,
+      ca1,
+      ca2,
+      exam,
+      grade
+    }).select().single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error inputting result" });
+  }
+});
+
+// ------------------------------
+// Mark attendance
+// ------------------------------
+app.post("/mark-attendance", async (req, res) => {
+  try {
+    const { class_id, date, present_student_ids = [] } = req.body;
+
+    for (const student_id of present_student_ids) {
+      await supabase.from("attendance").insert({
+        student_id,
+        class_id,
+        date
+      });
+    }
+
+    res.json({ message: "Attendance marked" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Error marking attendance" });
+  }
+});
+
+// ------------------------------
 // Start server
-// ---------------------------
+// ------------------------------
 app.listen(PORT, () => {
   console.log(`School portal backend running on port ${PORT}`);
+  console.log(`Frontend allowed: ${FRONTEND_URL}`);
 });
+
 
 
 
